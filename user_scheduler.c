@@ -3,6 +3,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
+#include <time.h>
 #include <sys/ipc.h>
 #include <sys/msg.h>
 #include <sys/time.h>
@@ -15,8 +16,7 @@
 typedef struct process_node {
     pid_t pid;
     int priority;
-    // PRÓXIMO PASSO: Adicionar campo para turnaround
-    // time_t start_time;
+    time_t start_time;
     struct process_node* next; // proximo no na fila
 } process_node_t;
 
@@ -69,12 +69,15 @@ process_node_t* dequeue_next_process() {
     }
     return NULL; 
 }
-int remove_process_from_queue(pid_t pid) {
+
+process_node_t* remove_process_from_queue(pid_t pid) {
     for (int i = 0; i < g_num_queues; i++) {
         process_node_t* current = g_queue_heads[i];
         process_node_t* prev = NULL;
+        
         while (current != NULL) {
             if (current->pid == pid) {
+                // Remove da fila
                 if (prev == NULL) {
                     g_queue_heads[i] = current->next;
                 } else {
@@ -83,14 +86,15 @@ int remove_process_from_queue(pid_t pid) {
                 if (g_queue_tails[i] == current) {
                     g_queue_tails[i] = prev;
                 }
-                free(current);
-                return 1;
+                
+                // RETORNA o nó ao invés de dar free
+                return current;
             }
             prev = current;
             current = current->next;
         }
     }
-    return 0;
+    return NULL;
 }
 
 // ...
@@ -123,12 +127,12 @@ void schedule() {
 // A função handle_exec() está quase PRONTA.
 // ...
 void handle_exec(char* command_args, pid_t client_pid) {
+    char command[64];
     int priority;
-    sscanf(command_args, "%d", &priority);
+    sscanf(command_args, "%63s %d", command, &priority);
 
     if (priority < 1 || priority > g_num_queues) {
         fprintf(stderr, "[Scheduler] Erro: Prioridade %d inválida.\n", priority);
-        // TODO: Enviar resposta de erro ao shell
         return;
     }
     
@@ -139,8 +143,8 @@ void handle_exec(char* command_args, pid_t client_pid) {
 
     if (pid == 0) { // --- Processo Filho (Worker) ---
         raise(SIGSTOP); 
-        execlp("./cpu_bound_loop", "cpu_bound_loop", NULL);
-        perror("execlp cpu_bound_loop");
+        execlp(command, command, NULL);;
+        perror("execlp");
         exit(1);
     }
 
@@ -157,9 +161,7 @@ void handle_exec(char* command_args, pid_t client_pid) {
     new_node->pid = pid;
     new_node->priority = priority;
     new_node->next = NULL;
-    
-    // PRÓXIMO PASSO: Salvar a hora de início para o turnaround
-    // new_node->start_time = time(NULL);
+    new_node->start_time = time(NULL);
 
     // 2. Adicionar o processo no FINAL da fila
     enqueue_at_end(new_node);
@@ -196,8 +198,11 @@ void handle_list(pid_t client_pid) {
 
     // Info do processo rodando
     if (g_current_process_pid != 0) {
-        snprintf(temp_buffer, sizeof(temp_buffer), "Processo Rodando: %d (P%d)\n", 
-                 g_current_process_pid, g_current_process_node->priority);
+        time_t now = time(NULL);
+        double elapsed = difftime(now, g_current_process_node->start_time);
+        snprintf(temp_buffer, sizeof(temp_buffer),
+            "Processo Rodando: %d (P%d) - Rodando há %.1fs\n",
+            g_current_process_pid, g_current_process_node->priority, elapsed);
         strcat(response_buffer, temp_buffer);
     } else {
         strcat(response_buffer, "Processo Rodando: NENHUM (CPU Ociosa)\n");
@@ -231,21 +236,38 @@ void handle_list(pid_t client_pid) {
 
 void handle_exit() {
     printf("[Scheduler] Recebido EXIT. Encerrando...\n");
-    
-    // PRÓXIMOS PASSOS:
-    // 1. Matar todos os processos filhos (workers) ainda vivos.
-    //    - Iterar por g_queue_heads[0], [1], [2]... e dar kill(pid, SIGKILL)
-    //    - Não esquecer de matar o g_current_process_pid também.
-    //    - Dar free() em todos os nós (nodes).
-    
-    // 2. Calcular turnaround para os processos que não terminaram e imprimir.
-    //    - Ex: double turnaround = difftime(time(NULL), node->start_time);
-    
-    // 3. Remover a fila de mensagens do sistema (JÁ FEITO)
+    time_t end_time = time(NULL);
+
+    // 1. Mata o processo atual
+    if (g_current_process_pid != 0) {
+        kill(g_current_process_pid, SIGKILL);
+        waitpid(g_current_process_pid, NULL, 0); // Colhe o filho
+        double turnaround = difftime(end_time, g_current_process_node->start_time);
+        printf("Processo %d (rodando) morto. Turnaround: %.2f seg\n", g_current_process_pid, turnaround);
+        free(g_current_process_node);
+    }
+
+    // 2. Mata processos nas filas
+    for (int i = 0; i < g_num_queues; i++) {
+        process_node_t* current = g_queue_heads[i];
+        while (current != NULL) {
+            kill(current->pid, SIGKILL);
+            waitpid(current->pid, NULL, 0); // Colhe o filho
+            double turnaround = difftime(end_time, current->start_time);
+            printf("Processo %d (fila P%d) morto. Turnaround: %.2f seg\n", 
+                   current->pid, i + 1, turnaround);
+
+            process_node_t* temp = current;
+            current = current->next;
+            free(temp); // Libera o nó
+        }
+    }
+
+    // 3. Remove a fila de mensagens
     if (msgctl(g_msg_queue_id, IPC_RMID, NULL) < 0) {
         perror("msgctl IPC_RMID");
     }
-    
+
     printf("[Scheduler] Encerrado.\n");
     exit(0);
 }
@@ -272,9 +294,9 @@ void sigchld_handler(int sig) {
         printf("[Scheduler] Filho %d terminou.\n", pid);
 
         if (pid == g_current_process_pid) {
-            // PRÓXIMO PASSO: Calcular e imprimir o turnaround aqui.
-            // Ex: double turnaround = difftime(time(NULL), g_current_process_node->start_time);
-            // printf("Processo %d terminou. Turnaround: %.2f seg\n", pid, turnaround);
+            time_t end_time = time(NULL);
+            double turnaround = difftime(end_time, g_current_process_node->start_time);
+            printf("Processo %d concluído. Turnaround: %.2f segundos\n", pid, turnaround);
 
             free(g_current_process_node);
             g_current_process_pid = 0;
@@ -283,14 +305,20 @@ void sigchld_handler(int sig) {
             schedule(); // Chama o escalonador para por outro para rodar.
         
         } else {
-            // Processo terminou mas não estava rodando (estava na fila)
-            // Isso não deveria acontecer (pois ele se congela), mas é bom tratar.
-            // A função remove_process_from_queue já dá free() no nó.
+        // Processo terminou enquanto estava na fila (anômalo)
+        process_node_t* node = remove_process_from_queue(pid);
+        
+        if (node != NULL) {
+            time_t end_time = time(NULL);
+            double turnaround = difftime(end_time, node->start_time);
             
-            // PRÓXIMO PASSO: Se quiséssemos turnaround aqui,
-            // a 'remove_process_from_queue' teria que *retornar* o nó
-            // antes de dar free(), para lermos o start_time.
-            remove_process_from_queue(pid);
+            printf("Processo %d terminou INESPERADAMENTE na fila.\n", pid);
+            printf("Turnaround parcial: %.2f segundos\n", turnaround);
+            
+            free(node);
+        } else {
+            printf("Processo %d terminou mas não foi encontrado!\n", pid);
+            }
         }
     }
 }

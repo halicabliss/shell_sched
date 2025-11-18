@@ -77,9 +77,13 @@ void send_command_to_scheduler(const char* command) {
     }
 }
 
-void execute_process(int priority) {
-    char command_buffer[64];
-    snprintf(command_buffer, sizeof(command_buffer), "EXEC %d", priority);
+void execute_process(const char* command, int priority) {
+    if (priority < 1 || priority > 3) {
+        fprintf(stderr, "Erro: Prioridade deve ser entre 1 e %d\n", 3);
+        return;
+    }
+    char command_buffer[128];
+    snprintf(command_buffer, sizeof(command_buffer), "EXEC %s %d", command, priority);
     send_command_to_scheduler(command_buffer);
 }
 
@@ -115,7 +119,8 @@ void exit_scheduler() {
 
 int main() {
     char cmd_buffer[MAX_CMD_LENGTH];
-    char arg_buffer[MAX_CMD_LENGTH];
+    char arg1_buffer[MAX_CMD_LENGTH];
+    char arg2_buffer[MAX_CMD_LENGTH];
     char line[MAX_LINE_LENGTH];
     
     while (1) {
@@ -129,17 +134,19 @@ int main() {
         }
         
         line[strcspn(line, "\n")] = '\0';
-        int argc = sscanf(line, "%49s %49s", cmd_buffer, arg_buffer);
+        int argc = sscanf(line, "%49s %49s %49s", cmd_buffer, arg1_buffer, arg2_buffer);
         if (argc == 0) continue;
 
         // execute command
         if (strcmp(cmd_buffer, "create_user_scheduler") == 0) {
-            if (argc == 2) create_user_scheduler(atoi(arg_buffer));
+            if (argc == 2) create_user_scheduler(atoi(arg1_buffer));
             else fprintf(stderr, "Uso: %s <numero_de_filas>\n", cmd_buffer);
 
         } else if (strcmp(cmd_buffer, "execute_process") == 0) {
-            if (argc == 2) execute_process(atoi(arg_buffer));
-            else fprintf(stderr, "Uso: %s <prioridade_do_processo>\n", cmd_buffer);
+            if (argc == 3) {
+                execute_process(arg1_buffer, atoi(arg2_buffer)); // arg1: comando, arg2: prioridade
+            }
+            else fprintf(stderr, "Uso: %s <comando> <prioridade>\n", cmd_buffer);
         
         } else if (strcmp(cmd_buffer, "list_scheduler") == 0) {
             list_scheduler();

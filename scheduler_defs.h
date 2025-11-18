@@ -16,7 +16,7 @@
 struct sched_msg {
     long mtype;           
     pid_t client_pid;     
-    char command[128];    
+    char command[512];    
 };
 
 #endif
