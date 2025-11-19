@@ -17,6 +17,6 @@ int main() {
 	clock_t current_time = clock();
 	elapsed_time = (double)(current_time - start_time) / CLOCKS_PER_SEC;
 	
-	printf("time: %.2f\n", elapsed_time);
+	//printf("time: %.2f\n", elapsed_time);
 	return 0;
 }
