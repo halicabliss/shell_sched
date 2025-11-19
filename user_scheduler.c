@@ -53,6 +53,7 @@ void enqueue_at_end(process_node_t* node) {
         g_queue_tails[queue_idx] = node;
     }
 }
+
 void enqueue_at_front(process_node_t* node) {
     int queue_idx = node->priority - 1; 
     node->next = g_queue_heads[queue_idx];
@@ -61,6 +62,25 @@ void enqueue_at_front(process_node_t* node) {
         g_queue_tails[queue_idx] = node;
     }
 }
+
+void add_to_history(pid_t pid, double turnaround) {
+    finished_process_t* node = (finished_process_t*)malloc(sizeof(finished_process_t));
+    if (node == NULL) return; 
+
+    node->pid = pid;
+    node->turnaround = turnaround;
+    node->next = NULL;
+
+    if (g_history_tail == NULL) {
+        g_history_head = node;
+        g_history_tail = node;
+    } else {
+        g_history_tail->next = node;
+        g_history_tail = node;
+    }
+}
+
+
 process_node_t* dequeue_next_process() {
     for (int i = 0; i < g_num_queues; i++) {
         if (g_queue_heads[i] != NULL) {
@@ -240,15 +260,44 @@ void handle_list(pid_t client_pid) {
 }
 
 void handle_exit() {
-    printf("[Scheduler] Recebido EXIT. Encerrando...\n");
+    printf("\n[Scheduler] Recebido EXIT.\n");
     time_t end_time = time(NULL);
 
+    
+    
+    printf("PROCESSOS FINALIZADOS:\n");
+    
+    
+    if (g_history_head == NULL) {
+        printf("Nenhum processo completou a execução.\n");
+    } else {
+        finished_process_t* current = g_history_head;
+        while (current != NULL) {
+            printf("PID: %d | Turnaround: %.2f s\n", current->pid, current->turnaround);
+            
+            
+            finished_process_t* temp = current;
+            current = current->next;
+            free(temp);
+        }
+    }
+
+    
+    printf("PROCESSOS INTERROMPIDOS:\n");
+
+    int killed_count = 0;
+
+    
     if (g_current_process_pid != 0) {
         kill(g_current_process_pid, SIGKILL);
-        waitpid(g_current_process_pid, NULL, 0); // Colhe o filho
+        waitpid(g_current_process_pid, NULL, 0);
+        
         double turnaround = difftime(end_time, g_current_process_node->start_time);
-        printf("Processo %d (rodando) morto. Turnaround: %.2f seg\n", g_current_process_pid, turnaround);
+        printf("PID: %d | Prioridade: %d | Turnaround Parcial: %.2f s (Na CPU)\n", 
+               g_current_process_pid, g_current_process_node->priority, turnaround);
+        
         free(g_current_process_node);
+        killed_count++;
     }
 
     
@@ -256,23 +305,31 @@ void handle_exit() {
         process_node_t* current = g_queue_heads[i];
         while (current != NULL) {
             kill(current->pid, SIGKILL);
-            waitpid(current->pid, NULL, 0); 
+            waitpid(current->pid, NULL, 0);
+            
             double turnaround = difftime(end_time, current->start_time);
-            printf("Processo %d (fila P%d) morto. Turnaround: %.2f seg\n", 
-                   current->pid, i + 1, turnaround);
+            printf("PID: %d | Prioridade: %d | Turnaround Parcial: %.2f s (Na Fila)\n", 
+                   current->pid, current->priority, turnaround);
 
             process_node_t* temp = current;
             current = current->next;
             free(temp);
+            killed_count++;
         }
     }
+
+    if (killed_count == 0) {
+        printf("Nenhum processo foi interrompido.\n");
+    }
+
+    printf("================================================\n");
 
     // remove a fila de mensagens
     if (msgctl(g_msg_queue_id, IPC_RMID, NULL) < 0) {
         perror("msgctl IPC_RMID");
     }
 
-    printf("[Scheduler] Encerrado.\n");
+    printf("[Scheduler] Encerrado com sucesso.\n");
     exit(0);
 }
 
@@ -288,32 +345,37 @@ void sigchld_handler(int sig) {
     int status;
 
     while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
-        printf("[Scheduler] Filho %d terminou.\n", pid);
+        time_t end_time = time(NULL);
+        double turnaround = 0.0;
+        int was_running = 0;
 
+        
         if (pid == g_current_process_pid) {
-            time_t end_time = time(NULL);
-            double turnaround = difftime(end_time, g_current_process_node->start_time);
-            printf("Processo %d concluído. Turnaround: %.2f s. Trocas de Contexto: %d\n", pid, turnaround, g_current_process_node->context_switches);
-
+            turnaround = difftime(end_time, g_current_process_node->start_time);
+            was_running = 1;
+            
+            
             free(g_current_process_node);
             g_current_process_pid = 0;
             g_current_process_node = NULL;
-            
-            schedule(); 
-        } else {
-        process_node_t* node = remove_process_from_queue(pid);
+        } 
         
-        if (node != NULL) {
-            time_t end_time = time(NULL);
-            double turnaround = difftime(end_time, node->start_time);
-            
-            printf("Processo %d terminou INESPERADAMENTE na fila.\n", pid);
-            printf("Turnaround parcial: %.2f segundos\n", turnaround);
-            
-            free(node);
-        } else {
-            printf("Processo %d terminou mas não foi encontrado!\n", pid);
+        else {
+            process_node_t* node = remove_process_from_queue(pid);
+            if (node != NULL) {
+                turnaround = difftime(end_time, node->start_time);
+                free(node);
             }
+        }
+
+        
+        if (turnaround > 0) {
+            printf("[Scheduler] Processo %d finalizado. Turnaround: %.2fs\n", pid, turnaround);
+            add_to_history(pid, turnaround);
+        }
+
+        if (was_running) {
+            schedule();
         }
     }
 }
