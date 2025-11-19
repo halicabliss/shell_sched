@@ -1,3 +1,19 @@
+/*
+ * -----------------------------------------------------------------------------
+ * PROJETO: Shell para escalonamento preemptivo-interrupt com prioridades
+ * -----------------------------------------------------------------------------
+ *
+ * AMBIENTE DE DESENVOLVIMENTO:
+ * Sistema Operacional: Linux 5.15.167.4-microsoft-standard-WSL2
+ * Versão do Compilador: gcc (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0
+ *
+ * AUTORES:
+ * - Emanuel de Oliveira Barbosa - 211010403
+ * - Luiz Felipe Ducat - 231035400
+ * - Pedro Arthur de Moura Neves - 211055352
+ * -----------------------------------------------------------------------------
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
