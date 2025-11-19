@@ -8,6 +8,7 @@
 #include <sys/msg.h>
 #include <sys/time.h>
 #include <sys/wait.h>
+#include <errno.h>
 
 #include "scheduler_defs.h" // definicoes e chave para msg
 
@@ -17,10 +18,19 @@ typedef struct process_node {
     pid_t pid;
     int priority;
     time_t start_time;
-    struct process_node* next; // proximo no na fila
+    int context_switches;
+    struct process_node* next;
 } process_node_t;
 
-// definir as filas de prioridade assumindo no maximo 3 filas
+typedef struct finished_process {
+    pid_t pid;
+    double turnaround;
+    struct finished_process* next;
+} finished_process_t;
+
+finished_process_t* g_history_head = NULL;
+finished_process_t* g_history_tail = NULL;
+
 #define MAX_QUEUES 3
 process_node_t* g_queue_heads[MAX_QUEUES] = { NULL, NULL, NULL };
 process_node_t* g_queue_tails[MAX_QUEUES] = { NULL, NULL, NULL };
@@ -31,10 +41,6 @@ int g_msg_queue_id = -1;
 int g_num_queues = 0;
 
 
-
-// funcoes
-// (enqueue_at_end, enqueue_at_front, dequeue_next_process, remove_process_from_queue)
-// ... essas funções estão PRONTAS. Não precisam de alteração. ...
 
 void enqueue_at_end(process_node_t* node) {
     int queue_idx = node->priority - 1;
@@ -87,7 +93,6 @@ process_node_t* remove_process_from_queue(pid_t pid) {
                     g_queue_tails[i] = prev;
                 }
                 
-                // RETORNA o nó ao invés de dar free
                 return current;
             }
             prev = current;
@@ -97,22 +102,16 @@ process_node_t* remove_process_from_queue(pid_t pid) {
     return NULL;
 }
 
-// ...
-// A função schedule() está PRONTA. Não precisa de alteração.
-// ...
 void schedule() {
     if (g_current_process_pid != 0 && g_current_process_node != NULL) {
-        printf("[Scheduler] Quantum estourou. Pausando %d (Prio %d)\n",
-               g_current_process_pid, g_current_process_node->priority);
         kill(g_current_process_pid, SIGSTOP);
-        enqueue_at_front(g_current_process_node);
+        enqueue_at_end(g_current_process_node);
         g_current_process_pid = 0;
         g_current_process_node = NULL;
     }
     process_node_t* next_process = dequeue_next_process();
     if (next_process != NULL) {
-        printf("[Scheduler] Iniciando/Continuando processo %d (Prio %d)\n",
-               next_process->pid, next_process->priority);
+        next_process->context_switches++;
         g_current_process_pid = next_process->pid;
         g_current_process_node = next_process;
         kill(g_current_process_pid, SIGCONT); 
@@ -123,9 +122,6 @@ void schedule() {
     }
 }
 
-// ...
-// A função handle_exec() está quase PRONTA.
-// ...
 void handle_exec(char* command_args, pid_t client_pid) {
     char command[64];
     int priority;
@@ -136,99 +132,108 @@ void handle_exec(char* command_args, pid_t client_pid) {
         return;
     }
     
+
     printf("[Scheduler] Recebido EXEC, prioridade: %d\n", priority);
 
     pid_t pid = fork();
     if (pid < 0) { perror("fork"); return; }
 
-    if (pid == 0) { // --- Processo Filho (Worker) ---
+    if (pid == 0) { 
         raise(SIGSTOP); 
-        execlp(command, command, NULL);;
+        execlp(command, command, NULL);
         perror("execlp");
         exit(1);
     }
 
-    // --- Processo Pai (Scheduler) ---
     printf("[Scheduler] Novo processo criado: %d\n", pid);
 
-    // 1. Criar o nó
     process_node_t* new_node = (process_node_t*)malloc(sizeof(process_node_t));
     if (new_node == NULL) { // Checagem de alocação
         fprintf(stderr, "Erro de alocação de memória!\n");
-        kill(pid, SIGKILL); // Mata o filho órfão
+        kill(pid, SIGKILL); // Mata o filho
         return;
     }
     new_node->pid = pid;
     new_node->priority = priority;
     new_node->next = NULL;
+    new_node->context_switches = 0;
     new_node->start_time = time(NULL);
+    
 
-    // 2. Adicionar o processo no FINAL da fila
+    // add ao final da fila
     enqueue_at_end(new_node);
     
-    // 3. Lógica de "Interrupção" (Preempção) - JÁ ESTÁ PRONTA
     int current_priority = 999; 
     if (g_current_process_pid != 0 && g_current_process_node != NULL) {
         current_priority = g_current_process_node->priority;
     }
+
     if (priority < current_priority) {
         printf("[Scheduler] PREEMPÇÃO: Novo processo %d (P%d) é mais prioritário.\n",
                new_node->pid, new_node->priority);
+        
+        
+        if (g_current_process_pid != 0) {
+            // pausa o processo atual
+            kill(g_current_process_pid, SIGSTOP);
+            
+            // coloca ele no inicio da fila (interrupção)
+            enqueue_at_front(g_current_process_node);
+            
+            g_current_process_pid = 0;
+            g_current_process_node = NULL;
+        }
+        
         schedule();
     }
 }
 
 void handle_list(pid_t client_pid) {
+    printf("\n");
     printf("[Scheduler] Recebido LIST\n");
     
-    // PRÓXIMOS PASSOS:
-    // 1. Percorrer as filas de prioridade e montar a lista de PIDs.
-    // 2. Montar uma string (char buffer[1024]) com as informações formatadas.
-    //    (Dica: use sprintf() ou strcat() para construir a string)
-    // 3. Enviar a string de volta para o shell (client_pid).
-    
-    // Exemplo de envio de resposta (substituir pela string montada):
     struct sched_msg reply;
-    reply.mtype = client_pid; // Responde para o PID do cliente
-    reply.client_pid = getpid(); // O scheduler é o cliente agora
+    reply.mtype = client_pid;
+    reply.client_pid = getpid();
     
-    // Montagem da string de resposta (EXEMPLO SIMPLES)
-    char response_buffer[512] = "";
-    char temp_buffer[100];
+    char response_buffer[2048] = ""; 
+    char temp_buffer[256];
 
-    // Info do processo rodando
     if (g_current_process_pid != 0) {
         time_t now = time(NULL);
         double elapsed = difftime(now, g_current_process_node->start_time);
+        
         snprintf(temp_buffer, sizeof(temp_buffer),
-            "Processo Rodando: %d (P%d) - Rodando há %.1fs\n",
-            g_current_process_pid, g_current_process_node->priority, elapsed);
+            ">>> [ CPU ] EM EXECUÇÃO:\n"
+            "    PID: %d | Prioridade: %d | Tempo: %.1fs | Trocas: %d\n",
+            g_current_process_pid, g_current_process_node->priority, elapsed, g_current_process_node->context_switches);
         strcat(response_buffer, temp_buffer);
     } else {
-        strcat(response_buffer, "Processo Rodando: NENHUM (CPU Ociosa)\n");
+        strcat(response_buffer, "\n>>> [ CPU ] EM EXECUÇÃO:\n    [ OCIOSA ]\n");
     }
 
-    // PRÓXIMO PASSO: Iterar pelas filas aqui
+    
     for (int i = 0; i < g_num_queues; i++) {
-        snprintf(temp_buffer, sizeof(temp_buffer), "Fila P%d: ", i + 1);
+        snprintf(temp_buffer, sizeof(temp_buffer), "\n>>> FILA DE PRIORIDADE %d:\n    ", i + 1);
         strcat(response_buffer, temp_buffer);
         
         process_node_t* current = g_queue_heads[i];
         if (current == NULL) {
-            strcat(response_buffer, "VAZIA\n");
+            strcat(response_buffer, "[ VAZIA ]\n");
         } else {
             while(current != NULL) {
-                snprintf(temp_buffer, sizeof(temp_buffer), "[%d] -> ", current->pid);
+                snprintf(temp_buffer, sizeof(temp_buffer), "[%d (T:%d)] -> ", current->pid,current->context_switches);
                 strcat(response_buffer, temp_buffer);
                 current = current->next;
             }
             strcat(response_buffer, "NULL\n");
         }
     }
+    
+    strcat(response_buffer, "\n");
 
-    // Copia a resposta final para a mensagem
+    
     snprintf(reply.command, sizeof(reply.command), "%s", response_buffer);
-
     if (msgsnd(g_msg_queue_id, &reply, sizeof(reply.command), 0) < 0) {
         perror("msgsnd reply");
     }
@@ -238,7 +243,6 @@ void handle_exit() {
     printf("[Scheduler] Recebido EXIT. Encerrando...\n");
     time_t end_time = time(NULL);
 
-    // 1. Mata o processo atual
     if (g_current_process_pid != 0) {
         kill(g_current_process_pid, SIGKILL);
         waitpid(g_current_process_pid, NULL, 0); // Colhe o filho
@@ -247,23 +251,23 @@ void handle_exit() {
         free(g_current_process_node);
     }
 
-    // 2. Mata processos nas filas
+    
     for (int i = 0; i < g_num_queues; i++) {
         process_node_t* current = g_queue_heads[i];
         while (current != NULL) {
             kill(current->pid, SIGKILL);
-            waitpid(current->pid, NULL, 0); // Colhe o filho
+            waitpid(current->pid, NULL, 0); 
             double turnaround = difftime(end_time, current->start_time);
             printf("Processo %d (fila P%d) morto. Turnaround: %.2f seg\n", 
                    current->pid, i + 1, turnaround);
 
             process_node_t* temp = current;
             current = current->next;
-            free(temp); // Libera o nó
+            free(temp);
         }
     }
 
-    // 3. Remove a fila de mensagens
+    // remove a fila de mensagens
     if (msgctl(g_msg_queue_id, IPC_RMID, NULL) < 0) {
         perror("msgctl IPC_RMID");
     }
@@ -272,10 +276,6 @@ void handle_exit() {
     exit(0);
 }
 
-// signal handlers
-// ...
-// O sigalrm_handler está PRONTO.
-// ...
 void sigalrm_handler(int sig) {
     if (g_current_process_pid == 0) {
         return; 
@@ -283,9 +283,6 @@ void sigalrm_handler(int sig) {
     schedule();
 }
 
-// ...
-// O sigchld_handler está quase PRONTO.
-// ...
 void sigchld_handler(int sig) {
     pid_t pid;
     int status;
@@ -296,16 +293,14 @@ void sigchld_handler(int sig) {
         if (pid == g_current_process_pid) {
             time_t end_time = time(NULL);
             double turnaround = difftime(end_time, g_current_process_node->start_time);
-            printf("Processo %d concluído. Turnaround: %.2f segundos\n", pid, turnaround);
+            printf("Processo %d concluído. Turnaround: %.2f s. Trocas de Contexto: %d\n", pid, turnaround, g_current_process_node->context_switches);
 
             free(g_current_process_node);
             g_current_process_pid = 0;
             g_current_process_node = NULL;
             
-            schedule(); // Chama o escalonador para por outro para rodar.
-        
+            schedule(); 
         } else {
-        // Processo terminou enquanto estava na fila (anômalo)
         process_node_t* node = remove_process_from_queue(pid);
         
         if (node != NULL) {
@@ -336,26 +331,21 @@ int main(int argc, char *argv[]) {
     }
 
     printf("[Scheduler] Iniciado. Filas: %d. PID: %d\n", g_num_queues, getpid());
-
-    // --- 1. Inicializar Filas de Prioridade ---
-    // (Não precisa alocar, já usamos globais)
-
-    // --- 2. Conectar à Fila de Mensagens ---
+    
     key_t key = ftok(MSG_QUEUE_KEY_PATH, MSG_QUEUE_KEY_ID);
     if (key == -1) { perror("ftok"); return 1; }
     
-    g_msg_queue_id = msgget(key, 0666); // Pega a fila criada pelo shell_sched
+    g_msg_queue_id = msgget(key, 0666); // pega a fila criada pelo shell_sched
     if (g_msg_queue_id < 0) {
         perror("msgget (o shell_sched deve criar primeiro)");
         return 1;
     }
 
-    // --- 3. Configurar Signal Handlers ---
     signal(SIGALRM, sigalrm_handler);
     signal(SIGCHLD, sigchld_handler);
-    signal(SIGINT, handle_exit);      // Ctrl+C no escalonador
+    signal(SIGINT, handle_exit);     
 
-    // --- 4. Configurar o Timer (Quantum) ---
+    // quantum
     struct itimerval timer;
     timer.it_value.tv_sec = 0;
     timer.it_value.tv_usec = QUANTUM_MS * 1000;
@@ -366,16 +356,19 @@ int main(int argc, char *argv[]) {
         perror("setitimer"); return 1;
     }
 
-    // --- 5. Loop Principal de Mensagens ---
+    
     struct sched_msg rx_msg;
     while (1) {
-        // Bloqueia esperando uma mensagem DO TIPO 1
-        if (msgrcv(g_msg_queue_id, &rx_msg, sizeof(rx_msg.command), MSG_TYPE_TO_SCHEDULER, 0) < 0) {
+        ssize_t result = msgrcv(g_msg_queue_id, &rx_msg, sizeof(rx_msg.command), MSG_TYPE_TO_SCHEDULER, 0);
+
+        if (result < 0) {
+            if (errno == EINTR) {
+                continue; }
+
             perror("msgrcv");
             break;
         }
 
-        // Processa o comando recebido
         if (strncmp(rx_msg.command, "EXEC", 4) == 0) {
             handle_exec(rx_msg.command + 5, rx_msg.client_pid);
         } else if (strcmp(rx_msg.command, "LIST") == 0) {

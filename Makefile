@@ -11,6 +11,5 @@ cpu_bound_loop: cpu_bound_loop.c
 
 clean:
 	rm -f shell_sched user_scheduler cpu_bound_loop
-	ipcrm -a  
 	
 .PHONY: all clean
